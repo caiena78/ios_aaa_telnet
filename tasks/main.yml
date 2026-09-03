@@ -1,0 +1,494 @@
+---
+
+  - name: Ensure ISE skip log directory exists
+    ansible.builtin.file:
+      path: "{{ ise_skip_log_file | dirname }}"
+      state: directory
+      mode: '0755'
+    delegate_to: localhost
+    when: ise_skip_log_file | default('', true) | length > 0
+
+  # --- ISE pre-check: verify device exists before configuring AAA ---
+  # (identical to roles/ios_aaa - Cisco ISE ERS calls are OS-agnostic and do
+  # not depend on how we talk to the device itself)
+
+  - name: Check if device exists in Cisco ISE by IP
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice?filter=ipaddress.EQ.{{ ansible_host }}"
+      method: GET
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      status_code: 200
+    register: ise_ip_check
+    delegate_to: localhost
+
+  - name: Set ISE IP found flag
+    ansible.builtin.set_fact:
+      ise_ip_found: "{{ ise_ip_check.json.SearchResult.total | int > 0 }}"
+
+  # IP found — always refresh the TACACS key
+  - name: Get full device record from ISE (IP match)
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice/{{ ise_ip_check.json.SearchResult.resources[0].id }}"
+      method: GET
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      status_code: 200
+    register: ise_ip_device_details
+    delegate_to: localhost
+    when: ise_ip_found
+
+  - name: Update TACACS key in ISE (IP match)
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice/{{ ise_ip_device_details.json.NetworkDevice.id }}"
+      method: PUT
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      body_format: json
+      body:
+        NetworkDevice: "{{ ise_ip_device_details.json.NetworkDevice | combine({'tacacsSettings': (ise_ip_device_details.json.NetworkDevice.tacacsSettings | default({})) | combine({'sharedSecret': tacacspwd, 'previousSharedSecret': tacacspwd, 'previousSharedSecretExpiry': 0})}, recursive=True) }}"
+      status_code: [200, 201]
+    delegate_to: localhost
+    when: ise_ip_found
+
+  # IP not found — try locating by device name and updating the record
+  - name: Check if device exists in Cisco ISE by name
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice?filter=name.EQ.{{ ise_device_name }}"
+      method: GET
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      status_code: 200
+    register: ise_name_check
+    delegate_to: localhost
+    when: not ise_ip_found
+
+  - name: Set ISE name found flag
+    ansible.builtin.set_fact:
+      ise_name_found: "{{ ise_name_check.json.SearchResult.total | int > 0 }}"
+    when: not ise_ip_found
+
+  - name: Get full device record from ISE (name match)
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice/{{ ise_name_check.json.SearchResult.resources[0].id }}"
+      method: GET
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      status_code: 200
+    register: ise_device_details
+    delegate_to: localhost
+    when:
+      - not ise_ip_found
+      - ise_name_found | default(false)
+
+  - name: Build ISE update payload - new IP and TACACS key
+    ansible.builtin.set_fact:
+      ise_update_body:
+        NetworkDevice: "{{ ise_device_details.json.NetworkDevice | combine({
+            'NetworkDeviceIPList': [{'ipaddress': ansible_host, 'mask': 32}],
+            'tacacsSettings': (ise_device_details.json.NetworkDevice.tacacsSettings | default({})) | combine({
+              'sharedSecret': tacacspwd,
+              'previousSharedSecret': tacacspwd,
+              'previousSharedSecretExpiry': 0
+            })
+          }, recursive=True) }}"
+    when:
+      - not ise_ip_found
+      - ise_name_found | default(false)
+
+  - name: Update device IP and TACACS settings in ISE
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice/{{ ise_device_details.json.NetworkDevice.id }}"
+      method: PUT
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      body_format: json
+      body: "{{ ise_update_body }}"
+      status_code: [200, 201]
+    register: ise_update_result
+    delegate_to: localhost
+    when:
+      - not ise_ip_found
+      - ise_name_found | default(false)
+
+  - name: ISE update debug
+    ansible.builtin.debug:
+      msg:
+        - "Updated {{ ise_device_name }} in ISE: IP set to {{ ansible_host }}"
+        - "ISE response status: {{ ise_update_result.status }}"
+    when:
+      - ise_debug | bool
+      - not ise_ip_found
+      - ise_name_found | default(false)
+
+  # Neither IP nor name found — look up NetBox for the site location, then create in ISE
+  - name: Look up site details from NetBox for ISE location
+    include_role:
+      name: netbox_getsite
+    when:
+      - not ise_ip_found
+      - not (ise_name_found | default(false))
+
+  - name: Set ISE location from NetBox site custom field
+    ansible.builtin.set_fact:
+      ISE_LOCATION: "Location#All Locations#{{ netbox_site_response.json.custom_fields.ISE_LOCATION }}"
+    when:
+      - not ise_ip_found
+      - not (ise_name_found | default(false))
+      - netbox_site_response is defined
+      - netbox_site_response.json.custom_fields.ISE_LOCATION is not none
+      - netbox_site_response.json.custom_fields.ISE_LOCATION | length > 0
+
+  - name: Default ISE location to All Locations when NetBox field is null
+    ansible.builtin.set_fact:
+      ISE_LOCATION: "Location#All Locations"
+    when:
+      - not ise_ip_found
+      - not (ise_name_found | default(false))
+      - ISE_LOCATION == "NONE"
+
+  - name: Create device in ISE - not found by IP or name
+    ansible.builtin.uri:
+      url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice"
+      method: POST
+      url_username: "{{ ise_username }}"
+      url_password: "{{ ise_password }}"
+      force_basic_auth: yes
+      validate_certs: "{{ ise_verify }}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      body_format: json
+      body:
+        NetworkDevice:
+          name: "{{ ise_device_name }}"
+          description: "{{ ISE_DESCRIPTION }}"
+          authenticationSettings:
+            enableKeyWrap: false
+            dtlsRequired: false
+            keyEncryptionKey: ""
+            messageAuthenticatorCodeKey: ""
+            keyInputFormat: "ASCII"
+            enableMultiSecret: "false"
+          tacacsSettings:
+            sharedSecret: "{{ tacacspwd }}"
+            connectModeOptions: "OFF"
+            previousSharedSecret: "{{ tacacspwd }}"
+            previousSharedSecretExpiry: 0
+          profileName: "Cisco"
+          coaPort: 1700
+          NetworkDeviceIPList:
+            - ipaddress: "{{ ansible_host }}"
+              mask: 32
+          NetworkDeviceGroupList:
+            - "{{ ISE_LOCATION }}"
+            - "IPSEC#Is IPSEC Device#No"
+            - "{{ ISE_DEVICE_TYPE }}"
+      status_code: [200, 201]
+    register: ise_create_result
+    delegate_to: localhost
+    when:
+      - not ise_ip_found
+      - not (ise_name_found | default(false))
+
+  - name: Log newly created ISE device
+    ansible.builtin.lineinfile:
+      path: "{{ ise_skip_log_file }}"
+      line: "{{ now(utc=True, fmt='%Y-%m-%d %H:%M:%S UTC') }} - {{ inventory_hostname }} ({{ ansible_host }}) - not found in ISE, created new device entry as {{ ise_device_name }}"
+      create: yes
+    delegate_to: localhost
+    when:
+      - not ise_ip_found
+      - not (ise_name_found | default(false))
+      - ise_skip_log_file | default('', true) | length > 0
+
+  - name: ISE create debug
+    ansible.builtin.debug:
+      msg:
+        - "Created {{ ise_device_name }} in ISE with IP {{ ansible_host }}"
+        - "ISE response status: {{ ise_create_result.status }}"
+    when:
+      - ise_debug | bool
+      - not ise_ip_found
+      - not (ise_name_found | default(false))
+
+  # ============================================================
+  # From here on, ios_aaa talks to the device via
+  # ansible.netcommon.network_cli (SSH). This role talks to it via raw
+  # ansible.netcommon.telnet instead. That module has no config diffing,
+  # no idempotency, and no built-in error detection - see README.md.
+  # ============================================================
+
+  - name: Gather interface and running-config info over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command:
+        - "terminal length 0"
+        - "enable"
+        - "{{ ansible_become_password }}"
+        - "show ip interface brief"
+        - "show running-config"
+    register: telnet_show
+    delegate_to: localhost
+    failed_when: >-
+      telnet_show.failed
+      or ('Building configuration' not in telnet_show.stdout)
+
+  - name: Extract management interface name matching ansible_host
+    ansible.builtin.set_fact:
+      mgntINT: >-
+        {{
+          (telnet_show.stdout
+           | regex_findall('(?m)^(\S+)\s+' ~ (ansible_host | regex_escape) ~ '\s')
+           | first) | default('NOT_SET')
+        }}
+
+  - name: Extract management interface config block from running-config
+    ansible.builtin.set_fact:
+      ios_mgnt_int_block: >-
+        {{
+          telnet_show.stdout
+          | regex_search('(?ms)^interface ' ~ (mgntINT | regex_escape) ~ '\r?$\n(?:^[ \t].*\r?$\n?)*')
+          | default('')
+        }}
+    when: mgntINT != "NOT_SET"
+
+  - name: Extract VRF forwarding from management interface block
+    ansible.builtin.set_fact:
+      vrf_name: >-
+        {{
+          (ios_mgnt_int_block | regex_findall('(?m)^\s*vrf forwarding (\S+)') | first) | default('NOT_SET')
+        }}
+    when: mgntINT != "NOT_SET"
+
+  - name: Default management interface/vrf when not detected
+    ansible.builtin.set_fact:
+      mgntINT: "{{ mgntINT | default('NOT_SET') }}"
+      vrf_name: "{{ vrf_name | default('NOT_SET') }}"
+
+  - name: Show detected management interface and VRF
+    ansible.builtin.debug:
+      msg:
+        - "Management interface is {{ mgntINT }}"
+        - "VRF name is {{ vrf_name }}"
+    when: telnet_debug | bool
+
+  - name: Build list of per-privilege-level command authorization lines to remove
+    ansible.builtin.set_fact:
+      aaa_cmd_authz_to_remove: >-
+        {{
+          telnet_show.stdout
+          | regex_findall('(?m)^\s*(aaa authorization commands (?:0|1|7|15) default.*)$')
+        }}
+
+  - name: Extract current TACACS-SERVERS group block from running-config
+    ansible.builtin.set_fact:
+      ios_tacacs_group_block: >-
+        {{ telnet_show.stdout
+           | regex_search('aaa group server tacacs\+ ' ~ (tacacs_group_name | regex_escape) ~ '[\s\S]*?(?=\n\S|\Z)', multiline=True)
+           | default('') }}
+
+  - name: Extract current VRF forwarding from TACACS-SERVERS group
+    ansible.builtin.set_fact:
+      ios_tacacs_group_vrf: >-
+        {{
+          (ios_tacacs_group_block | regex_findall('(?m)^\s*ip vrf forwarding (\S+)') | first) | default('NOT_SET')
+        }}
+
+  - name: Extract configured VTY line ranges
+    ansible.builtin.set_fact:
+      ios_vty_line_ranges: >-
+        {{ telnet_show.stdout | regex_findall('(?m)^line vty (\S+ \S+)') }}
+
+  - name: Build list of undefined TACACS group members to remove (name-based)
+    ansible.builtin.set_fact:
+      tacacs_group_undefined_names: >-
+        {{
+          ios_tacacs_group_block
+          | regex_findall('server name (\S+)')
+          | difference(tacacs | map(attribute='name') | list)
+        }}
+
+  - name: Build list of undefined TACACS group members to remove (IP-based)
+    ansible.builtin.set_fact:
+      tacacs_group_undefined_ips: >-
+        {{
+          ios_tacacs_group_block
+          | regex_findall('(?m)^\s*server (?!name\s)(\S+)')
+          | difference(tacacs | map(attribute='address') | list)
+        }}
+
+  # --- Build the full ordered configuration command list ---
+  # Everything below is sent in ONE telnet session, so this replaces
+  # ios_aaa's per-task ios_config parents/lines with a flat command list.
+  # aaa group server tacacs+ is entered/exited exactly once here (ios_aaa
+  # re-enters it across several separate tasks; that's a byproduct of how
+  # ios_config's "parents" work per-task and isn't needed here).
+
+  - name: Build ordered list of configuration commands to send over telnet
+    ansible.builtin.set_fact:
+      ios_telnet_cmds: >-
+        {%- set cmds = ['configure terminal', 'aaa new-model'] -%}
+
+        {%- if LOCAL_USER != "NONE" and LOCAL_PWD != "NONE" and LOCAL_ENABLE != "NONE" -%}
+          {%- if ios_telnet_use_legacy_secret_syntax -%}
+            {%- set _ = cmds.append('username ' ~ LOCAL_USER ~ ' privilege 15 secret ' ~ LOCAL_PWD) -%}
+            {%- set _ = cmds.append('enable secret ' ~ LOCAL_ENABLE) -%}
+          {%- else -%}
+            {%- set _ = cmds.append('user ' ~ LOCAL_USER ~ ' privilege 15 algorithm-type scrypt secret ' ~ LOCAL_PWD) -%}
+            {%- set _ = cmds.append('enable algorithm-type scrypt secret ' ~ LOCAL_ENABLE) -%}
+          {%- endif -%}
+        {%- endif -%}
+
+        {%- for line in aaa_cmd_authz_to_remove -%}
+          {%- set _ = cmds.append('no ' ~ line) -%}
+        {%- endfor -%}
+
+        {%- if mgntINT != "NOT_SET" -%}
+          {%- set _ = cmds.append('ip tacacs source-interface ' ~ mgntINT) -%}
+        {%- endif -%}
+
+        {%- for item in tacacs -%}
+          {%- if ios_telnet_use_legacy_tacacs_syntax -%}
+            {%- set _ = cmds.append('tacacs-server host ' ~ item.address ~ ' key ' ~ item.key) -%}
+          {%- else -%}
+            {%- set _ = cmds.append('tacacs server ' ~ item.name) -%}
+            {%- set _ = cmds.append('address ipv4 ' ~ item.address) -%}
+            {%- set _ = cmds.append('key ' ~ item.key) -%}
+            {%- set _ = cmds.append('timeout ' ~ item.host_timeout) -%}
+            {%- set _ = cmds.append('exit') -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        {%- set _ = cmds.append('aaa group server tacacs+ ' ~ tacacs_group_name) -%}
+        {%- for item in tacacs -%}
+          {%- if ios_telnet_use_legacy_tacacs_syntax -%}
+            {%- set _ = cmds.append('server ' ~ item.address) -%}
+          {%- else -%}
+            {%- set _ = cmds.append('server name ' ~ item.name) -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        {%- if remove_undefined_servers -%}
+          {%- for name in tacacs_group_undefined_names -%}
+            {%- set _ = cmds.append('no server name ' ~ name) -%}
+          {%- endfor -%}
+          {%- for addr in tacacs_group_undefined_ips -%}
+            {%- set _ = cmds.append('no server ' ~ addr) -%}
+          {%- endfor -%}
+        {%- endif -%}
+
+        {%- if ios_tacacs_group_vrf != "NOT_SET" and ios_tacacs_group_vrf != vrf_name -%}
+          {%- set _ = cmds.append('no ip vrf forwarding ' ~ ios_tacacs_group_vrf) -%}
+        {%- endif -%}
+
+        {%- if mgntINT != "NOT_SET" -%}
+          {%- if vrf_name != "NOT_SET" -%}
+            {%- set _ = cmds.append('ip vrf forwarding ' ~ vrf_name) -%}
+            {%- set _ = cmds.append('ip tacacs source-interface ' ~ mgntINT ~ ' vrf ' ~ vrf_name) -%}
+          {%- else -%}
+            {%- set _ = cmds.append('ip tacacs source-interface ' ~ mgntINT) -%}
+          {%- endif -%}
+        {%- endif -%}
+        {%- set _ = cmds.append('exit') -%}
+
+        {%- set _ = cmds.append('aaa authentication suppress null-username') -%}
+        {%- set _ = cmds.append('aaa accounting suppress null-username') -%}
+        {%- set _ = cmds.append('aaa authentication login default group ' ~ tacacs_group_name ~ ' local-case') -%}
+        {%- set _ = cmds.append('aaa authentication enable default group ' ~ tacacs_group_name ~ ' enable') -%}
+        {%- set _ = cmds.append('aaa authorization console') -%}
+        {%- set _ = cmds.append('aaa authorization config-commands') -%}
+        {%- set _ = cmds.append('aaa authorization exec default group ' ~ tacacs_group_name ~ ' local if-authenticated') -%}
+        {%- set _ = cmds.append('aaa accounting send stop-record authentication failure') -%}
+        {%- set _ = cmds.append('aaa accounting exec default start-stop group ' ~ tacacs_group_name) -%}
+        {%- set _ = cmds.append('aaa accounting commands 0 default start-stop group ' ~ tacacs_group_name) -%}
+        {%- set _ = cmds.append('aaa accounting commands 1 default start-stop group ' ~ tacacs_group_name) -%}
+        {%- set _ = cmds.append('aaa accounting commands 7 default start-stop group ' ~ tacacs_group_name) -%}
+        {%- set _ = cmds.append('aaa accounting commands 15 default start-stop group ' ~ tacacs_group_name) -%}
+        {%- set _ = cmds.append('aaa accounting system default start-stop group ' ~ tacacs_group_name) -%}
+
+        {%- set _ = cmds.append('line con 0') -%}
+        {%- set _ = cmds.append('login authentication default') -%}
+        {%- set _ = cmds.append('exit') -%}
+
+        {%- for rng in ios_vty_line_ranges -%}
+          {%- set _ = cmds.append('line vty ' ~ rng) -%}
+          {%- set _ = cmds.append('login authentication default') -%}
+          {%- set _ = cmds.append('authorization exec default') -%}
+          {%- set _ = cmds.append('exit') -%}
+        {%- endfor -%}
+
+        {%- set _ = cmds.append('end') -%}
+        {%- set _ = cmds.append('show running-config | include aaa authentication login default|aaa group server tacacs') -%}
+        {%- set _ = cmds.append('write memory') -%}
+        {{ cmds }}
+
+  - name: Show commands that will be sent over telnet
+    ansible.builtin.debug:
+      var: ios_telnet_cmds
+    when: telnet_debug | bool
+
+  - name: Push AAA/TACACS configuration over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command: "{{ ['terminal length 0', 'enable', ansible_become_password] + ios_telnet_cmds }}"
+    register: ios_telnet_push_result
+    delegate_to: localhost
+    # ansible.netcommon.telnet has no built-in error detection - it never
+    # fails on a bad command, so this is a best-effort scan for the IOS
+    # error markers most likely to show up from a bad AAA/TACACS push.
+    failed_when: >-
+      ios_telnet_push_result.failed
+      or (ios_telnet_push_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+      or ('command authorization failed' in (ios_telnet_push_result.stdout | lower))
+
+  - name: Show telnet push result
+    ansible.builtin.debug:
+      var: ios_telnet_push_result.stdout_lines
+    when: telnet_debug | bool

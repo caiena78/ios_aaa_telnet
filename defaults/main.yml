@@ -1,0 +1,56 @@
+---
+LOCAL_USER: "NONE"
+LOCAL_PWD: "NONE"
+LOCAL_ENABLE: "NONE"
+tacacspwd: "Password"
+ISE_LOCATION: "NONE"
+ISE_DESCRIPTION: "NONE"
+ISE_DEVICE_TYPE: "Device Type#All Device Types#Access Switches"
+ise_debug: false
+
+# Cisco ISE connection settings
+ise_hostname: "ise.example.org"
+ise_port: 9060
+ise_username: "admin"
+ise_password: "password"
+ise_verify: false
+# Name used to look up the device in ISE when the IP is not found.
+# Defaults to inventory_hostname; override per-host if ISE name differs.
+ise_device_name: "{{ inventory_hostname }}"
+
+# Path for logging hosts skipped because they were not found in ISE.
+# Relative to the playbook directory; override with an absolute path if needed.
+ise_skip_log_file: "{{ playbook_dir }}/logs/ise_not_found.log"
+
+# When true, remove any servers from aaa group server tacacs+ TACACS-SERVERS
+# that are not defined in the tacacs list variable.
+remove_undefined_servers: false
+
+# Name of the "aaa group server tacacs+" group used for TACACS AAA config.
+tacacs_group_name: "TACACS-SERVERS"
+
+# --- Telnet transport settings ---
+# This role talks to the device over raw telnet (ansible.netcommon.telnet)
+# instead of ansible.netcommon.network_cli/SSH used by ios_aaa. See README.md
+# for why that exists and the real limitations it carries: no config diffing/
+# idempotency, no built-in per-command error detection, and the device MUST
+# already present a username prompt (login local) - a bare password-only VTY
+# line will hang this role waiting for a username prompt that never appears.
+telnet_port: 23
+telnet_login_prompt: "Username: "
+telnet_password_prompt: "Password: "
+telnet_timeout: 30
+telnet_pause: 1
+# Matches a mid-session "Password:" re-prompt (from "enable") and any IOS
+# exec/config-mode prompt (">", "#", "(config)#", "(config-if)#", etc.).
+telnet_prompts:
+  - "Password:\\s*$"
+  - "[>#]\\s*$"
+telnet_debug: false
+
+# Set true only if the target IOS release is too old to support the modern
+# "algorithm-type scrypt secret" / "tacacs server <name>" syntax. ios_aaa can
+# auto-detect this with a rescue block over network_cli; this role cannot
+# detect it reliably over raw telnet, so it must be set explicitly per host.
+ios_telnet_use_legacy_secret_syntax: false
+ios_telnet_use_legacy_tacacs_syntax: false

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  license: MIT
+  min_ansible_version: "2.10"
+  role_name: ios_aaa_telnet
+  author: Chad Aiena
+  description: Telnet-transport variant of ios_aaa - configures AAA/TACACS on Cisco IOS/IOS-XE and registers the device in Cisco ISE, for devices reachable only over telnet
+  company: Sapphire Health
+# collections: []
+# dependencies: []
+...
