@@ -316,7 +316,20 @@
       aaa_cmd_authz_to_remove: >-
         {{
           telnet_show.stdout
-          | regex_findall('(?m)^\s*(aaa authorization commands (?:0|1|7|15) default.*)$')
+          | regex_findall('(?m)^\s*(aaa authorization commands (?:0|1|7|15) \S+.*)$')
+        }}
+
+  # "default" is the list name this role's own accounting config uses (see the
+  # "aaa accounting ..." lines in the command builder below) - only remove
+  # OTHER named accounting exec/commands lists (e.g. a leftover "EJGHlist"),
+  # never the default ones this role pushes itself.
+  - name: Build list of non-default named AAA accounting exec/commands lines to remove
+    ansible.builtin.set_fact:
+      aaa_acct_named_to_remove: >-
+        {{
+          (telnet_show.stdout | regex_findall('(?m)^\s*(aaa accounting exec (?!default\b)\S+ start-stop group \S+.*)$'))
+          +
+          (telnet_show.stdout | regex_findall('(?m)^\s*(aaa accounting commands (?:0|1|7|15) (?!default\b)\S+ start-stop group \S+.*)$'))
         }}
 
   - name: Extract current TACACS-SERVERS group block from running-config
@@ -379,6 +392,10 @@
         {%- endif -%}
 
         {%- for line in aaa_cmd_authz_to_remove -%}
+          {%- set _ = cmds.append('no ' ~ line) -%}
+        {%- endfor -%}
+
+        {%- for line in aaa_acct_named_to_remove -%}
           {%- set _ = cmds.append('no ' ~ line) -%}
         {%- endfor -%}
 
