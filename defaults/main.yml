@@ -37,8 +37,12 @@ tacacs_group_name: "TACACS-SERVERS"
 # already present a username prompt (login local) - a bare password-only VTY
 # line will hang this role waiting for a username prompt that never appears.
 telnet_port: 23
-telnet_login_prompt: "Username: "
-telnet_password_prompt: "Password: "
+# login_prompt/password_prompt are matched as a raw regex against the
+# literal byte stream (ansible.netcommon.telnet uses Python's telnetlib
+# under the hood), not a plain substring - so these must tolerate devices
+# that don't send a trailing space after the colon.
+telnet_login_prompt: "Username:\\s*"
+telnet_password_prompt: "Password:\\s*"
 telnet_timeout: 30
 telnet_pause: 1
 # Matches a mid-session "Password:" re-prompt (from "enable") and any IOS
