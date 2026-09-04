@@ -1,5 +1,55 @@
 ---
 
+  # ============================================================
+  # Connect to the device FIRST so we know its real hostname before we
+  # touch ISE - ios_aaa_telnet talks to the device via raw
+  # ansible.netcommon.telnet instead of ansible.netcommon.network_cli
+  # (SSH). That module has no config diffing, no idempotency, and no
+  # built-in error detection - see README.md.
+  # ============================================================
+
+  - name: Gather interface and running-config info over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command:
+        - "terminal length 0"
+        - "enable"
+        - "{{ ansible_become_password }}"
+        - "show ip interface brief"
+        - "show running-config"
+    register: telnet_show
+    delegate_to: localhost
+    failed_when: >-
+      telnet_show.failed
+      or ('Building configuration' not in telnet_show.stdout)
+
+  # Use the device's own configured hostname (not inventory_hostname) as the
+  # name we look up/create in ISE under. Falls back to inventory_hostname if
+  # "show running-config" didn't have a "hostname X" line for some reason.
+  - name: Extract configured hostname from running-config
+    ansible.builtin.set_fact:
+      ios_telnet_hostname: >-
+        {{
+          (telnet_show.stdout | regex_findall('(?m)^hostname (\S+)') | first) | default(inventory_hostname)
+        }}
+
+  - name: Use device hostname as the ISE device name
+    ansible.builtin.set_fact:
+      ise_device_name: "{{ ios_telnet_hostname }}"
+
+  - name: Show detected device hostname
+    ansible.builtin.debug:
+      msg: "Device hostname detected as {{ ios_telnet_hostname }}, using this as ise_device_name"
+    when: telnet_debug | bool
+
   - name: Ensure ISE skip log directory exists
     ansible.builtin.file:
       path: "{{ ise_skip_log_file | dirname }}"
@@ -61,7 +111,10 @@
         Accept: "application/json"
       body_format: json
       body:
-        NetworkDevice: "{{ ise_ip_device_details.json.NetworkDevice | combine({'tacacsSettings': (ise_ip_device_details.json.NetworkDevice.tacacsSettings | default({})) | combine({'sharedSecret': tacacspwd, 'previousSharedSecret': tacacspwd, 'previousSharedSecretExpiry': 0})}, recursive=True) }}"
+        NetworkDevice: "{{ ise_ip_device_details.json.NetworkDevice | combine({
+            'tacacsSettings': (ise_ip_device_details.json.NetworkDevice.tacacsSettings | default({})) | combine({'sharedSecret': tacacspwd, 'previousSharedSecret': tacacspwd, 'previousSharedSecretExpiry': 0}),
+            'NetworkDeviceGroupList': (ise_ip_device_details.json.NetworkDevice.NetworkDeviceGroupList | default([]) | reject('match', '^Device Type#') | list) + [ISE_DEVICE_TYPE]
+          }, recursive=True) }}"
       status_code: [200, 201]
     delegate_to: localhost
     when: ise_ip_found
@@ -115,7 +168,8 @@
               'sharedSecret': tacacspwd,
               'previousSharedSecret': tacacspwd,
               'previousSharedSecretExpiry': 0
-            })
+            }),
+            'NetworkDeviceGroupList': (ise_device_details.json.NetworkDevice.NetworkDeviceGroupList | default([]) | reject('match', '^Device Type#') | list) + [ISE_DEVICE_TYPE]
           }, recursive=True) }}"
     when:
       - not ise_ip_found
@@ -242,35 +296,7 @@
       - not ise_ip_found
       - not (ise_name_found | default(false))
 
-  # ============================================================
-  # From here on, ios_aaa talks to the device via
-  # ansible.netcommon.network_cli (SSH). This role talks to it via raw
-  # ansible.netcommon.telnet instead. That module has no config diffing,
-  # no idempotency, and no built-in error detection - see README.md.
-  # ============================================================
-
-  - name: Gather interface and running-config info over telnet
-    ansible.netcommon.telnet:
-      host: "{{ ansible_host }}"
-      port: "{{ telnet_port }}"
-      user: "{{ ansible_user }}"
-      password: "{{ ansible_password }}"
-      login_prompt: "{{ telnet_login_prompt }}"
-      password_prompt: "{{ telnet_password_prompt }}"
-      prompts: "{{ telnet_prompts }}"
-      timeout: "{{ telnet_timeout }}"
-      pause: "{{ telnet_pause }}"
-      command:
-        - "terminal length 0"
-        - "enable"
-        - "{{ ansible_become_password }}"
-        - "show ip interface brief"
-        - "show running-config"
-    register: telnet_show
-    delegate_to: localhost
-    failed_when: >-
-      telnet_show.failed
-      or ('Building configuration' not in telnet_show.stdout)
+  # --- telnet_show was already gathered at the top of this file ---
 
   - name: Extract management interface name matching ansible_host
     ansible.builtin.set_fact:
