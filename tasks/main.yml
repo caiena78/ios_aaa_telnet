@@ -605,7 +605,12 @@
       var: ios_telnet_tacacs_group_result.stdout_lines
     when: telnet_debug | bool
 
-  # --- AAA COMMANDS (authentication/authorization/accounting) ---
+  # --- AAA COMMANDS + CONSOLE/VTY LINES + VERIFY + SAVE ---
+  # These are all top-level config commands with no nested context left
+  # open between them, so they share one telnet session: the AAA
+  # authentication/authorization/accounting lines, then console/VTY line
+  # config, then "end" to drop back to exec for the verification show and
+  # "write memory".
 
   - name: Build list of AAA authentication/authorization/accounting commands
     ansible.builtin.set_fact:
@@ -636,37 +641,6 @@
         {%- set _ = cmds.append('aaa accounting system default start-stop group ' ~ tacacs_group_name) -%}
         {{ cmds }}
 
-  - name: Show AAA commands that will be sent
-    ansible.builtin.debug:
-      var: ios_telnet_aaa_cmds
-    when: telnet_debug | bool
-
-  - name: Push AAA authentication/authorization/accounting configuration over telnet
-    ansible.netcommon.telnet:
-      host: "{{ ansible_host }}"
-      port: "{{ telnet_port }}"
-      user: "{{ ansible_user }}"
-      password: "{{ ansible_password }}"
-      login_prompt: "{{ telnet_login_prompt }}"
-      password_prompt: "{{ telnet_password_prompt }}"
-      prompts: "{{ telnet_prompts }}"
-      timeout: "{{ telnet_timeout }}"
-      pause: "{{ telnet_pause }}"
-      command: "{{ ['terminal length 0', 'enable', ansible_become_password, 'configure terminal'] + ios_telnet_aaa_cmds + ['end'] }}"
-    register: ios_telnet_aaa_result
-    delegate_to: localhost
-    failed_when: >-
-      ios_telnet_aaa_result.failed
-      or (ios_telnet_aaa_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
-      or ('command authorization failed' in (ios_telnet_aaa_result.stdout | lower))
-
-  - name: Show AAA push result
-    ansible.builtin.debug:
-      var: ios_telnet_aaa_result.stdout_lines
-    when: telnet_debug | bool
-
-  # --- CONSOLE/VTY LINES + VERIFY + SAVE ---
-
   - name: Build list of console/VTY line commands
     ansible.builtin.set_fact:
       ios_telnet_finalize_cmds: >-
@@ -680,12 +654,12 @@
         {%- endfor -%}
         {{ cmds }}
 
-  - name: Show console/VTY commands that will be sent
+  - name: Show AAA and console/VTY commands that will be sent
     ansible.builtin.debug:
-      var: ios_telnet_finalize_cmds
+      msg: "{{ ios_telnet_aaa_cmds + ios_telnet_finalize_cmds }}"
     when: telnet_debug | bool
 
-  - name: Push console/VTY line configuration, verify, and save over telnet
+  - name: Push AAA and console/VTY line configuration, verify, and save over telnet
     ansible.netcommon.telnet:
       host: "{{ ansible_host }}"
       port: "{{ telnet_port }}"
@@ -699,16 +673,18 @@
       command: >-
         {{
           ['terminal length 0', 'enable', ansible_become_password, 'configure terminal']
+          + ios_telnet_aaa_cmds
           + ios_telnet_finalize_cmds
           + ['end', 'show running-config | include aaa authentication login default|aaa group server tacacs', 'write memory']
         }}
-    register: ios_telnet_finalize_result
+    register: ios_telnet_aaa_finalize_result
     delegate_to: localhost
     failed_when: >-
-      ios_telnet_finalize_result.failed
-      or (ios_telnet_finalize_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+      ios_telnet_aaa_finalize_result.failed
+      or (ios_telnet_aaa_finalize_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+      or ('command authorization failed' in (ios_telnet_aaa_finalize_result.stdout | lower))
 
-  - name: Show console/VTY/save push result
+  - name: Show AAA and console/VTY/save push result
     ansible.builtin.debug:
-      var: ios_telnet_finalize_result.stdout_lines
+      var: ios_telnet_aaa_finalize_result.stdout_lines
     when: telnet_debug | bool
