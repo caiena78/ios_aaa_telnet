@@ -523,27 +523,56 @@
             using Type 9, Type 5, or password syntax - device may need manual configuration.
         when: not local_user_configured
 
-  # --- Build the full ordered configuration command list ---
-  # Everything below is sent in ONE telnet session, so this replaces
-  # ios_aaa's per-task ios_config parents/lines with a flat command list.
-  # aaa group server tacacs+ is entered/exited exactly once here (ios_aaa
-  # re-enters it across several separate tasks; that's a byproduct of how
-  # ios_config's "parents" work per-task and isn't needed here).
+  # --------------------------------------------------------------------
+  # AAA/TACACS CONFIGURATION, ONE LOGICAL STAGE PER TASK
+  # Each stage below is its own ansible.netcommon.telnet task - the module
+  # has no persistent-connection support, so each one is a fresh login +
+  # enable + "configure terminal", self-contained, with its own
+  # failed_when. This trades a few extra logins for clear per-stage task
+  # names and per-stage pass/fail in the playbook run, instead of one
+  # giant task covering the whole AAA/TACACS push.
   # NOTE: local user/enable secret are configured separately above (with
-  # syntax fallback), so they are no longer part of this command list.
+  # syntax fallback) - they are their own stage already.
+  # --------------------------------------------------------------------
 
-  - name: Build ordered list of configuration commands to send over telnet
+  - name: Enable AAA new-model over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command:
+        - "terminal length 0"
+        - "enable"
+        - "{{ ansible_become_password }}"
+        - "configure terminal"
+        - "aaa new-model"
+        - "end"
+    register: ios_telnet_aaa_newmodel_result
+    delegate_to: localhost
+    # ansible.netcommon.telnet has no built-in error detection - it never
+    # fails on a bad command, so this is a best-effort scan for the IOS
+    # error markers most likely to show up from a bad push.
+    failed_when: >-
+      ios_telnet_aaa_newmodel_result.failed
+      or (ios_telnet_aaa_newmodel_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+
+  - name: Show AAA new-model push result
+    ansible.builtin.debug:
+      var: ios_telnet_aaa_newmodel_result.stdout_lines
+    when: telnet_debug | bool
+
+  # --- TACACS SERVERS ---
+
+  - name: Build list of TACACS server definition commands
     ansible.builtin.set_fact:
-      ios_telnet_cmds: >-
-        {%- set cmds = ['configure terminal', 'aaa new-model'] -%}
-
-        {%- for line in aaa_cmd_authz_to_remove -%}
-          {%- set _ = cmds.append('no ' ~ line) -%}
-        {%- endfor -%}
-
-        {%- for line in aaa_acct_named_to_remove -%}
-          {%- set _ = cmds.append('no ' ~ line) -%}
-        {%- endfor -%}
+      ios_telnet_tacacs_server_cmds: >-
+        {%- set cmds = [] -%}
 
         {%- if mgntINT != "NOT_SET" -%}
           {%- set _ = cmds.append('ip tacacs source-interface ' ~ mgntINT) -%}
@@ -560,8 +589,43 @@
             {%- set _ = cmds.append('exit') -%}
           {%- endif -%}
         {%- endfor -%}
+        {{ cmds }}
 
-        {%- set _ = cmds.append('aaa group server tacacs+ ' ~ tacacs_group_name) -%}
+  - name: Show TACACS server commands that will be sent
+    ansible.builtin.debug:
+      var: ios_telnet_tacacs_server_cmds
+    when: telnet_debug | bool
+
+  - name: Push TACACS server definitions over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command: "{{ ['terminal length 0', 'enable', ansible_become_password, 'configure terminal'] + ios_telnet_tacacs_server_cmds + ['end'] }}"
+    register: ios_telnet_tacacs_server_result
+    delegate_to: localhost
+    failed_when: >-
+      ios_telnet_tacacs_server_result.failed
+      or (ios_telnet_tacacs_server_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+
+  - name: Show TACACS server push result
+    ansible.builtin.debug:
+      var: ios_telnet_tacacs_server_result.stdout_lines
+    when: telnet_debug | bool
+
+  # --- TACACS GROUP ---
+
+  - name: Build list of TACACS group commands
+    ansible.builtin.set_fact:
+      ios_telnet_tacacs_group_cmds: >-
+        {%- set cmds = ['aaa group server tacacs+ ' ~ tacacs_group_name] -%}
+
         {%- for item in tacacs -%}
           {%- if ios_telnet_use_legacy_tacacs_syntax -%}
             {%- set _ = cmds.append('server ' ~ item.address) -%}
@@ -592,6 +656,50 @@
           {%- endif -%}
         {%- endif -%}
         {%- set _ = cmds.append('exit') -%}
+        {{ cmds }}
+
+  - name: Show TACACS group commands that will be sent
+    ansible.builtin.debug:
+      var: ios_telnet_tacacs_group_cmds
+    when: telnet_debug | bool
+
+  - name: Push TACACS group configuration over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command: "{{ ['terminal length 0', 'enable', ansible_become_password, 'configure terminal'] + ios_telnet_tacacs_group_cmds + ['end'] }}"
+    register: ios_telnet_tacacs_group_result
+    delegate_to: localhost
+    failed_when: >-
+      ios_telnet_tacacs_group_result.failed
+      or (ios_telnet_tacacs_group_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+
+  - name: Show TACACS group push result
+    ansible.builtin.debug:
+      var: ios_telnet_tacacs_group_result.stdout_lines
+    when: telnet_debug | bool
+
+  # --- AAA COMMANDS (authentication/authorization/accounting) ---
+
+  - name: Build list of AAA authentication/authorization/accounting commands
+    ansible.builtin.set_fact:
+      ios_telnet_aaa_cmds: >-
+        {%- set cmds = [] -%}
+
+        {%- for line in aaa_cmd_authz_to_remove -%}
+          {%- set _ = cmds.append('no ' ~ line) -%}
+        {%- endfor -%}
+
+        {%- for line in aaa_acct_named_to_remove -%}
+          {%- set _ = cmds.append('no ' ~ line) -%}
+        {%- endfor -%}
 
         {%- set _ = cmds.append('aaa authentication suppress null-username') -%}
         {%- set _ = cmds.append('aaa accounting suppress null-username') -%}
@@ -607,29 +715,14 @@
         {%- set _ = cmds.append('aaa accounting commands 7 default start-stop group ' ~ tacacs_group_name) -%}
         {%- set _ = cmds.append('aaa accounting commands 15 default start-stop group ' ~ tacacs_group_name) -%}
         {%- set _ = cmds.append('aaa accounting system default start-stop group ' ~ tacacs_group_name) -%}
-
-        {%- set _ = cmds.append('line con 0') -%}
-        {%- set _ = cmds.append('login authentication default') -%}
-        {%- set _ = cmds.append('exit') -%}
-
-        {%- for rng in ios_vty_line_ranges -%}
-          {%- set _ = cmds.append('line vty ' ~ rng) -%}
-          {%- set _ = cmds.append('login authentication default') -%}
-          {%- set _ = cmds.append('authorization exec default') -%}
-          {%- set _ = cmds.append('exit') -%}
-        {%- endfor -%}
-
-        {%- set _ = cmds.append('end') -%}
-        {%- set _ = cmds.append('show running-config | include aaa authentication login default|aaa group server tacacs') -%}
-        {%- set _ = cmds.append('write memory') -%}
         {{ cmds }}
 
-  - name: Show commands that will be sent over telnet
+  - name: Show AAA commands that will be sent
     ansible.builtin.debug:
-      var: ios_telnet_cmds
+      var: ios_telnet_aaa_cmds
     when: telnet_debug | bool
 
-  - name: Push AAA/TACACS configuration over telnet
+  - name: Push AAA authentication/authorization/accounting configuration over telnet
     ansible.netcommon.telnet:
       host: "{{ ansible_host }}"
       port: "{{ telnet_port }}"
@@ -640,18 +733,63 @@
       prompts: "{{ telnet_prompts }}"
       timeout: "{{ telnet_timeout }}"
       pause: "{{ telnet_pause }}"
-      command: "{{ ['terminal length 0', 'enable', ansible_become_password] + ios_telnet_cmds }}"
-    register: ios_telnet_push_result
+      command: "{{ ['terminal length 0', 'enable', ansible_become_password, 'configure terminal'] + ios_telnet_aaa_cmds + ['end'] }}"
+    register: ios_telnet_aaa_result
     delegate_to: localhost
-    # ansible.netcommon.telnet has no built-in error detection - it never
-    # fails on a bad command, so this is a best-effort scan for the IOS
-    # error markers most likely to show up from a bad AAA/TACACS push.
     failed_when: >-
-      ios_telnet_push_result.failed
-      or (ios_telnet_push_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
-      or ('command authorization failed' in (ios_telnet_push_result.stdout | lower))
+      ios_telnet_aaa_result.failed
+      or (ios_telnet_aaa_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+      or ('command authorization failed' in (ios_telnet_aaa_result.stdout | lower))
 
-  - name: Show telnet push result
+  - name: Show AAA push result
     ansible.builtin.debug:
-      var: ios_telnet_push_result.stdout_lines
+      var: ios_telnet_aaa_result.stdout_lines
+    when: telnet_debug | bool
+
+  # --- CONSOLE/VTY LINES + VERIFY + SAVE ---
+
+  - name: Build list of console/VTY line commands
+    ansible.builtin.set_fact:
+      ios_telnet_finalize_cmds: >-
+        {%- set cmds = ['line con 0', 'login authentication default', 'exit'] -%}
+
+        {%- for rng in ios_vty_line_ranges -%}
+          {%- set _ = cmds.append('line vty ' ~ rng) -%}
+          {%- set _ = cmds.append('login authentication default') -%}
+          {%- set _ = cmds.append('authorization exec default') -%}
+          {%- set _ = cmds.append('exit') -%}
+        {%- endfor -%}
+        {{ cmds }}
+
+  - name: Show console/VTY commands that will be sent
+    ansible.builtin.debug:
+      var: ios_telnet_finalize_cmds
+    when: telnet_debug | bool
+
+  - name: Push console/VTY line configuration, verify, and save over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command: >-
+        {{
+          ['terminal length 0', 'enable', ansible_become_password, 'configure terminal']
+          + ios_telnet_finalize_cmds
+          + ['end', 'show running-config | include aaa authentication login default|aaa group server tacacs', 'write memory']
+        }}
+    register: ios_telnet_finalize_result
+    delegate_to: localhost
+    failed_when: >-
+      ios_telnet_finalize_result.failed
+      or (ios_telnet_finalize_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret|ambiguous command)'))
+
+  - name: Show console/VTY/save push result
+    ansible.builtin.debug:
+      var: ios_telnet_finalize_result.stdout_lines
     when: telnet_debug | bool
