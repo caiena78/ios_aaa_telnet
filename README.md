@@ -24,16 +24,23 @@ matter for a security-relevant config change:
   running this role is to *create* the first local admin account, and the device currently has
   no username-based login at all, this role cannot bootstrap that over telnet. You'd need to set
   up local-login manually (console access) first.
-- **No automatic legacy-syntax fallback.** `ios_aaa` uses a `block`/`rescue` over `network_cli`
-  to detect old IOS releases that don't support `algorithm-type scrypt` / `tacacs server <name>`
-  syntax and falls back automatically. This role can't detect that reliably over raw telnet, so
-  you must set `ios_telnet_use_legacy_secret_syntax: true` and/or
-  `ios_telnet_use_legacy_tacacs_syntax: true` explicitly per host/group if needed.
-- **One consolidated telnet session for the whole push**, not per-task `ios_config` calls. This
-  is mostly a simplification, not a loss: `aaa group server tacacs+` is entered/exited once
-  instead of the several times `ios_aaa` does across separate tasks (that repetition in `ios_aaa`
-  is a side effect of how `ios_config`'s `parents:` works per-task, not a deliberate design this
-  role needed to reproduce). The `ip tacacs source-interface` / `ip vrf forwarding` handling
+- **Local user/enable secret always use the old syntax.** The IOS releases this role targets
+  (e.g. VG224 voice gateways) reject `algorithm-type scrypt` outright, so the local user is set
+  with `username <user> privilege 15 password <pwd>` - stored as Type 7 when
+  `service password-encryption` is configured on the device, cleartext otherwise - and the
+  enable secret with `enable secret <pwd>`. There is no Type 9/scrypt path and no toggle.
+- **No automatic legacy-syntax fallback for TACACS.** `ios_aaa` uses a `block`/`rescue` over
+  `network_cli` to detect old IOS releases that don't support `tacacs server <name>` syntax and
+  falls back automatically. This role can't detect that reliably over raw telnet, so you must
+  set `ios_telnet_use_legacy_tacacs_syntax: true` explicitly per host/group if needed.
+- **One telnet session per logical stage**, not per-task `ios_config` calls. The push is split
+  into separate tasks - local user/enable secret, AAA new-model, TACACS servers, TACACS group,
+  AAA authentication/authorization/accounting, and console/VTY lines + verify + save - so each
+  stage gets its own task name and its own pass/fail. `ansible.netcommon.telnet` has no
+  persistent-connection support, so each stage re-logs in and re-enters `configure terminal`;
+  that costs a handful of extra logins per device in exchange for being able to see which stage
+  failed instead of reading one wall of combined stdout. The `ip tacacs source-interface` /
+  `ip vrf forwarding` handling
   under the group is likewise consolidated into one clean pair of commands, replacing three
   overlapping, hard-to-follow tasks in `ios_aaa` that were doing the same thing.
 - **Untested against a live device.** This was built and validated by rendering the Jinja
@@ -60,8 +67,8 @@ adds:
   `telnet_pause`, `telnet_prompts` - transport settings for `ansible.netcommon.telnet`.
 - `telnet_debug` - when true, prints the detected management interface/VRF, the full command
   list before it's sent, and the raw session output after.
-- `ios_telnet_use_legacy_secret_syntax`, `ios_telnet_use_legacy_tacacs_syntax` - manual
-  overrides for old IOS releases (see above).
+- `ios_telnet_use_legacy_tacacs_syntax` - manual override for old IOS releases that don't
+  support `tacacs server <name>` syntax (see above).
 
 This role authenticates to the device using the same `ansible_user` / `ansible_password` as
 `ios_aaa`, and enters enable mode using `ansible_become_password` - same variables, just used

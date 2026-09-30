@@ -53,8 +53,9 @@ telnet_prompts:
 telnet_debug: false
 
 # Set true only if the target IOS release is too old to support the modern
-# "algorithm-type scrypt secret" / "tacacs server <name>" syntax. ios_aaa can
-# auto-detect this with a rescue block over network_cli; this role cannot
-# detect it reliably over raw telnet, so it must be set explicitly per host.
-ios_telnet_use_legacy_secret_syntax: false
+# "tacacs server <name>" syntax. ios_aaa can auto-detect this with a rescue
+# block over network_cli; this role cannot detect it reliably over raw
+# telnet, so it must be set explicitly per host.
+# (Local user/enable secret always use the "password" / "enable secret"
+# forms - see tasks/main.yml - so there is no secret-syntax toggle.)
 ios_telnet_use_legacy_tacacs_syntax: false

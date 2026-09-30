@@ -396,132 +396,51 @@
         }}
 
   # ------------------------------------------------------------------------
-  # LOCAL USER + ENABLE SECRET (cascading syntax fallback)
-  # Different IOS releases accept different secret-hashing syntax. Try the
-  # modern Type 9 (scrypt) syntax first, fall back to the classic Type 5
-  # "secret" syntax if that's rejected, and fall back again to the oldest
-  # "password" syntax (cleartext, or Type 7 once "service
-  # password-encryption" is configured on the device) as a last resort.
-  # ansible.netcommon.telnet has no built-in per-command error detection, so
-  # each attempt is sent in its own telnet session and judged by scanning
-  # its stdout for IOS's "% Invalid input" error text.
+  # LOCAL USER + ENABLE SECRET
+  # The older IOS images this role targets (e.g. VG224 voice gateways)
+  # reject the Type 9 "algorithm-type scrypt" syntax outright, so the local
+  # user is set with the "password" form - stored as Type 7 when "service
+  # password-encryption" is configured on the device, cleartext otherwise -
+  # and the enable secret with the classic "enable secret" form.
   # ------------------------------------------------------------------------
 
-  - name: Configure local user and enable secret (with syntax fallback)
+  - name: Configure local user and enable secret over telnet
+    ansible.netcommon.telnet:
+      host: "{{ ansible_host }}"
+      port: "{{ telnet_port }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password }}"
+      login_prompt: "{{ telnet_login_prompt }}"
+      password_prompt: "{{ telnet_password_prompt }}"
+      prompts: "{{ telnet_prompts }}"
+      timeout: "{{ telnet_timeout }}"
+      pause: "{{ telnet_pause }}"
+      command:
+        - "terminal length 0"
+        - "enable"
+        - "{{ ansible_become_password }}"
+        - "configure terminal"
+        - "username {{ LOCAL_USER }} privilege 15 password {{ LOCAL_PWD }}"
+        - "enable secret {{ LOCAL_ENABLE }}"
+        - "end"
+    register: ios_telnet_local_user_result
+    delegate_to: localhost
+    failed_when: >-
+      ios_telnet_local_user_result.failed
+      or (ios_telnet_local_user_result.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret)'))
     when:
       - LOCAL_USER != "NONE"
       - LOCAL_PWD != "NONE"
       - LOCAL_ENABLE != "NONE"
-    block:
-      - name: Initialize local-user-configured tracking fact
-        ansible.builtin.set_fact:
-          local_user_configured: false
 
-      - name: Attempt 1 - modern algorithm-type scrypt syntax (Type 9)
-        ansible.netcommon.telnet:
-          host: "{{ ansible_host }}"
-          port: "{{ telnet_port }}"
-          user: "{{ ansible_user }}"
-          password: "{{ ansible_password }}"
-          login_prompt: "{{ telnet_login_prompt }}"
-          password_prompt: "{{ telnet_password_prompt }}"
-          prompts: "{{ telnet_prompts }}"
-          timeout: "{{ telnet_timeout }}"
-          pause: "{{ telnet_pause }}"
-          command:
-            - "terminal length 0"
-            - "enable"
-            - "{{ ansible_become_password }}"
-            - "configure terminal"
-            - "username {{ LOCAL_USER }} privilege 15 algorithm-type scrypt secret {{ LOCAL_PWD }}"
-            - "enable algorithm-type scrypt secret {{ LOCAL_ENABLE }}"
-            - "end"
-        register: local_user_attempt_1
-        delegate_to: localhost
-        ignore_errors: true
-        when: not ios_telnet_use_legacy_secret_syntax
-
-      - name: Check whether attempt 1 (Type 9) succeeded
-        ansible.builtin.set_fact:
-          local_user_configured: >-
-            {{
-              not (local_user_attempt_1.failed
-                   or (local_user_attempt_1.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret)')))
-            }}
-        when: not ios_telnet_use_legacy_secret_syntax
-
-      - name: Attempt 2 - classic secret syntax (Type 5) if Type 9 was rejected or skipped
-        ansible.netcommon.telnet:
-          host: "{{ ansible_host }}"
-          port: "{{ telnet_port }}"
-          user: "{{ ansible_user }}"
-          password: "{{ ansible_password }}"
-          login_prompt: "{{ telnet_login_prompt }}"
-          password_prompt: "{{ telnet_password_prompt }}"
-          prompts: "{{ telnet_prompts }}"
-          timeout: "{{ telnet_timeout }}"
-          pause: "{{ telnet_pause }}"
-          command:
-            - "terminal length 0"
-            - "enable"
-            - "{{ ansible_become_password }}"
-            - "configure terminal"
-            - "username {{ LOCAL_USER }} privilege 15 secret {{ LOCAL_PWD }}"
-            - "enable secret {{ LOCAL_ENABLE }}"
-            - "end"
-        register: local_user_attempt_2
-        delegate_to: localhost
-        ignore_errors: true
-        when: not local_user_configured
-
-      - name: Check whether attempt 2 (Type 5) succeeded
-        ansible.builtin.set_fact:
-          local_user_configured: >-
-            {{
-              not (local_user_attempt_2.failed
-                   or (local_user_attempt_2.stdout is regex('(?i)% ?(invalid input|incomplete command|bad secret)')))
-            }}
-        when: not local_user_configured
-
-      - name: Attempt 3 - oldest password syntax (cleartext or Type 7) as last resort
-        ansible.netcommon.telnet:
-          host: "{{ ansible_host }}"
-          port: "{{ telnet_port }}"
-          user: "{{ ansible_user }}"
-          password: "{{ ansible_password }}"
-          login_prompt: "{{ telnet_login_prompt }}"
-          password_prompt: "{{ telnet_password_prompt }}"
-          prompts: "{{ telnet_prompts }}"
-          timeout: "{{ telnet_timeout }}"
-          pause: "{{ telnet_pause }}"
-          command:
-            - "terminal length 0"
-            - "enable"
-            - "{{ ansible_become_password }}"
-            - "configure terminal"
-            - "username {{ LOCAL_USER }} privilege 15 password {{ LOCAL_PWD }}"
-            - "enable password {{ LOCAL_ENABLE }}"
-            - "end"
-        register: local_user_attempt_3
-        delegate_to: localhost
-        ignore_errors: true
-        when: not local_user_configured
-
-      - name: Check whether attempt 3 (password/Type 7) succeeded
-        ansible.builtin.set_fact:
-          local_user_configured: >-
-            {{
-              not (local_user_attempt_3.failed
-                   or (local_user_attempt_3.stdout is regex('(?i)% ?(invalid input|incomplete command)')))
-            }}
-        when: not local_user_configured
-
-      - name: Warn if no local-user/enable-secret syntax succeeded
-        ansible.builtin.debug:
-          msg: >-
-            Could not set local user {{ LOCAL_USER }} / enable secret on {{ inventory_hostname }}
-            using Type 9, Type 5, or password syntax - device may need manual configuration.
-        when: not local_user_configured
+  - name: Show local user/enable secret push result
+    ansible.builtin.debug:
+      var: ios_telnet_local_user_result.stdout_lines
+    when:
+      - telnet_debug | bool
+      - LOCAL_USER != "NONE"
+      - LOCAL_PWD != "NONE"
+      - LOCAL_ENABLE != "NONE"
 
   # --------------------------------------------------------------------
   # AAA/TACACS CONFIGURATION, ONE LOGICAL STAGE PER TASK
