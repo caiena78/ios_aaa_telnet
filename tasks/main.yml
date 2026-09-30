@@ -412,7 +412,7 @@
             {%- set _ = cmds.append('username ' ~ LOCAL_USER ~ ' privilege 15 secret ' ~ LOCAL_PWD) -%}
             {%- set _ = cmds.append('enable secret ' ~ LOCAL_ENABLE) -%}
           {%- else -%}
-            {%- set _ = cmds.append('user ' ~ LOCAL_USER ~ ' privilege 15 algorithm-type scrypt secret ' ~ LOCAL_PWD) -%}
+            {%- set _ = cmds.append('username ' ~ LOCAL_USER ~ ' privilege 15 algorithm-type scrypt secret ' ~ LOCAL_PWD) -%}
             {%- set _ = cmds.append('enable algorithm-type scrypt secret ' ~ LOCAL_ENABLE) -%}
           {%- endif -%}
         {%- endif -%}
